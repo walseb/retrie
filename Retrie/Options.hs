@@ -7,6 +7,7 @@
 {-# LANGUAGE ApplicativeDo #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE NumericUnderscores #-}
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TupleSections #-}
 module Retrie.Options
@@ -28,7 +29,9 @@ module Retrie.Options
   , GrepCommands(..)
   ) where
 
+#if __GLASGOW_HASKELL__ < 914
 import Control.Concurrent.Async (mapConcurrently)
+#endif
 import Control.Monad (when, foldM)
 import Data.Bool
 import Data.Char (isAlphaNum, isSpace)
@@ -401,7 +404,14 @@ forFn Options{..} c f
   where
     fn
       | singleThreaded = mapM
+#if __GLASGOW_HASKELL__ < 914
       | otherwise = mapConcurrently
+#else
+      -- GHC 9.14's parser turns the AsyncCancelled exceptions used by
+      -- mapConcurrently into "impossible" panics. Keep GHC API work on the
+      -- calling thread until that is fixed upstream.
+      | otherwise = mapM
+#endif
 
 -- | Find all files to target for rewriting.
 getTargetFiles :: Options_ a b -> [GroundTerms] -> IO [FilePath]
