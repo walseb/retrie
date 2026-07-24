@@ -7,7 +7,6 @@
 {-# LANGUAGE ApplicativeDo #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE NumericUnderscores #-}
-{-# LANGUAGE CPP #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TupleSections #-}
 module Retrie.Options
@@ -29,9 +28,7 @@ module Retrie.Options
   , GrepCommands(..)
   ) where
 
-#if __GLASGOW_HASKELL__ < 914
 import Control.Concurrent.Async (mapConcurrently)
-#endif
 import Control.Monad (when, foldM)
 import Data.Bool
 import Data.Char (isAlphaNum, isSpace)
@@ -387,12 +384,19 @@ addLocalFixities libdir opts = do
   files <- getTargetFiles opts' [HashSet.singleton "infix"]
 
   fixFns <- forFn opts files $ \ fp -> do
-    ms <- toList <$> parseCPPFile (parseContentNoFixity libdir) fp
-    return $ extendFixityEnv
-      [ (rdrFS nm, fixity)
-      | m <- ms
-      , (L _ nm, fixity) <- fixityDecls (unLoc (astA m))
-      ]
+    parsed <- trySync $ parseCPPFile (parseContentNoFixity libdir) fp
+    case parsed of
+      Left ex -> do
+        when (verbosity opts > Normal) $
+          putErrStrLn $ "Skipping fixity declarations in " ++ fp ++ ": " ++ show ex
+        return id
+      Right cpp -> do
+        let ms = toList cpp
+        return $ extendFixityEnv
+          [ (rdrFS nm, fixity)
+          | m <- ms
+          , (L _ nm, fixity) <- fixityDecls (unLoc (astA m))
+          ]
 
   return opts { fixityEnv = foldr ($) (fixityEnv opts) fixFns }
 
@@ -404,14 +408,7 @@ forFn Options{..} c f
   where
     fn
       | singleThreaded = mapM
-#if __GLASGOW_HASKELL__ < 914
       | otherwise = mapConcurrently
-#else
-      -- GHC 9.14's parser turns the AsyncCancelled exceptions used by
-      -- mapConcurrently into "impossible" panics. Keep GHC API work on the
-      -- calling thread until that is fixed upstream.
-      | otherwise = mapM
-#endif
 
 -- | Find all files to target for rewriting.
 getTargetFiles :: Options_ a b -> [GroundTerms] -> IO [FilePath]
