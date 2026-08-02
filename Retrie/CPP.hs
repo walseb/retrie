@@ -293,6 +293,8 @@ extractCPPCond t
   | Just ('#',t') <- Text.uncons t =
     case Text.words t' of
       ("if":_) -> Just If
+      ("ifdef":_) -> Just If
+      ("ifndef":_) -> Just If
       ("else":_) -> Just Else
       ("elif":_) -> Just ElIf
       ("endif":_) -> Just EndIf

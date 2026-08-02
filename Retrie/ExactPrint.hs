@@ -20,7 +20,9 @@ module Retrie.ExactPrint
     -- * Parsers
   , Parsers.LibDir
   , parseContent
+  , parseContentWithExtensions
   , parseContentNoFixity
+  , parseContentNoFixityWithExtensions
   , parseDecl
   , parseExpr
   , parseImports
@@ -49,9 +51,11 @@ module Retrie.ExactPrint
   ) where
 
 import Control.Exception
+import qualified GHC.Driver.Session as Session
+import qualified GHC.LanguageExtensions as LangExt
 import Control.Monad
 import Control.Monad.State.Lazy
-import Data.List (transpose)
+import Data.List (find, stripPrefix, transpose)
 import Text.Printf
 
 import Language.Haskell.GHC.ExactPrint hiding
@@ -276,16 +280,32 @@ swapEntryDPT a b = return (transferEntryDP b a, transferEntryDP a b)
 -- Compatibility module with ghc-exactprint
 
 parseContentNoFixity :: Parsers.LibDir -> FilePath -> String -> IO AnnotatedModule
-parseContentNoFixity libdir fp str = join $ Parsers.withDynFlags libdir $ \dflags -> do
-  r <- Parsers.parseModuleFromString libdir fp str
-  case r of
-    Left msg -> do
-      fail $ showSDoc dflags $ ppr msg
+parseContentNoFixity libdir = parseContentNoFixityWithExtensions libdir []
+
+-- | Parse using extensions supplied by the containing Cabal component.
+parseContentNoFixityWithExtensions :: Parsers.LibDir -> [String] -> FilePath -> String -> IO AnnotatedModule
+parseContentNoFixityWithExtensions libdir extensions fp str = Parsers.ghcWrapper libdir $ do
+  dflags <- Parsers.initDynFlagsPure fp str
+  let dflags' = foldl enable dflags extensions
+  case Parsers.parseModuleFromStringInternal dflags' fp str of
+    Left msg -> fail $ fp ++ ": " ++ showSDoc dflags' (ppr msg)
     Right m -> return $ unsafeMkA (makeDeltaAst m) 0
+  where
+    enable dflags extension =
+      case readExtension extension of
+        Just ext -> Session.xopt_set dflags ext
+        Nothing -> case stripPrefix "No" extension >>= readExtension of
+          Just ext -> Session.xopt_unset dflags ext
+          Nothing -> dflags
+    readExtension :: String -> Maybe LangExt.Extension
+    readExtension name = find ((== name) . show) [minBound .. maxBound]
 
 parseContent :: Parsers.LibDir -> FixityEnv -> FilePath -> String -> IO AnnotatedModule
-parseContent libdir fixities fp =
-  parseContentNoFixity libdir fp >=> (`transformA` fix fixities)
+parseContent libdir = parseContentWithExtensions libdir []
+
+parseContentWithExtensions :: Parsers.LibDir -> [String] -> FixityEnv -> FilePath -> String -> IO AnnotatedModule
+parseContentWithExtensions libdir extensions fixities fp =
+  parseContentNoFixityWithExtensions libdir extensions fp >=> (`transformA` fix fixities)
 
 -- | Parse import statements. Each string must be a full import statement,
 -- including the keyword 'import'. Supports full import syntax.

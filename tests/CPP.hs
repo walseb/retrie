@@ -40,6 +40,10 @@ testList =
       [ ["a","","b","","c"]
       , ["a","","","","c"]
       ]
+  , CPPTest "ifdef" ifDefCode
+      [ ["a","","b","","c"]
+      , ["a","","","","c"]
+      ]
   , CPPTest "if else" ifElseCode
       [ ["a","b","","","","","e","f","","g","h"]
       , ["a","b","","c","d","","","","","g","h"]
@@ -87,6 +91,15 @@ oneIfCode :: Text
 oneIfCode = Text.unlines
   [ "a"
   , "#if FOO"
+  , "b"
+  , "#endif"
+  , "c"
+  ]
+
+ifDefCode :: Text
+ifDefCode = Text.unlines
+  [ "a"
+  , "#ifdef FOO"
   , "b"
   , "#endif"
   , "c"

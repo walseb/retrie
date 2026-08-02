@@ -31,7 +31,7 @@ module Retrie.Options
 import Control.Concurrent.Async (mapConcurrently)
 import Control.Monad (when, foldM)
 import Data.Bool
-import Data.Char (isAlphaNum, isSpace)
+import Data.Char (isAlphaNum, isSpace, toLower)
 import Data.Default as D
 import Data.Foldable (toList)
 import Data.Functor.Identity
@@ -75,7 +75,7 @@ parseOptions libdir fixityEnv = do
 parseRewritesInternal :: LibDir -> Options_ a b -> [RewriteSpec] -> IO [Rewrite Universe]
 parseRewritesInternal libdir Options{..} = parseRewriteSpecs libdir parser fixityEnv
   where
-    parser fp = parseCPPFile (parseContent libdir fixityEnv) (targetDir </> fp)
+    parser fp = parseCPPFile (parseContentWithExtensions libdir languageExtensions fixityEnv) (targetDir </> fp)
 
 -- | Controls the ultimate action taken by 'apply'. The default action is
 -- 'ExecRewrite'.
@@ -105,6 +105,8 @@ data Options_ rewrites imports = Options
     -- ^ Iterate the given rewrites or 'Retrie' computation up to this many
     -- times. Iteration may stop before the limit if no changes are made during
     -- a given iteration.
+  , languageExtensions :: [String]
+    -- ^ Extensions inherited from the nearest Cabal file.
   , noDefaultElaborations :: Bool
     -- ^ Do not apply any of the built in elaborations in 'defaultElaborations'.
   , randomOrder :: Bool
@@ -138,6 +140,7 @@ defaultOptions fp = Options
   , extraIgnores = []
   , fixityEnv = mempty
   , iterateN = 1
+  , languageExtensions = []
   , noDefaultElaborations = False
   , randomOrder = False
   , rewrites = D.def
@@ -177,6 +180,11 @@ buildParser dOpts = do
     , action "file" -- complete with filenames
     , help "Target specific file for rewriting."
     ]
+  languageExtensions <- concatMap parseExtensions <$> many (option str $ mconcat
+    [ long "default-extensions"
+    , metavar "EXTENSIONS"
+    , help "Comma-separated language extensions used by the target component."
+    ])
   verbosity <- parseVerbosity (verbosity dOpts)
   additionalImports <- many $ option str $ mconcat
     [ long "import"
@@ -215,7 +223,18 @@ buildParser dOpts = do
   rewrites <- parseRewriteSpecOptions
   elaborations <- parseElaborations
   roundtrips <- parseRoundtrips
-  return Options{ fixityEnv = fixityEnv dOpts, ..}
+  return Options
+    { fixityEnv = fixityEnv dOpts
+    , ..
+    }
+  where
+    parseExtensions = filter (not . null) . map trim . split
+    split [] = [[]]
+    split (',':cs) = [] : split cs
+    split (c:cs) = case split cs of
+      part:parts -> (c:part) : parts
+      [] -> [[c]]
+    trim = dropWhileEnd isSpace . dropWhile isSpace
 
 parseElaborations :: Parser [RewriteSpec]
 parseElaborations = concat <$> traverse many
@@ -355,8 +374,18 @@ type ProtoOptions = Options_ [RewriteSpec] [String]
 resolveOptions :: LibDir -> ProtoOptions -> IO Options
 resolveOptions libdir protoOpts = do
   absoluteTargetDir <- makeAbsolute (targetDir protoOpts)
+  let extensionRoot = case targetFiles protoOpts of
+        fp:_ -> takeDirectory $ if isAbsolute fp then fp else absoluteTargetDir </> fp
+        [] -> absoluteTargetDir
+  inheritedExtensions <- findCabalExtensions extensionRoot
+  let extensions
+        | null (languageExtensions protoOpts) = inheritedExtensions
+        | otherwise = languageExtensions protoOpts
   opts@Options{..} <-
-    addLocalFixities libdir protoOpts { targetDir = absoluteTargetDir }
+    addLocalFixities libdir protoOpts
+      { targetDir = absoluteTargetDir
+      , languageExtensions = extensions
+      }
   parsedImports <- parseImports libdir additionalImports
   debugPrint verbosity "Imports:" $
     runIdentity $ fmap astA $ transformA parsedImports $ \ imps -> do
@@ -375,20 +404,60 @@ resolveOptions libdir protoOpts = do
     , ..
     }
 
+-- | Read the union of default extensions from the nearest Cabal file. Cabal
+-- components may differ, but enabling the union is sufficient for parsing.
+findCabalExtensions :: FilePath -> IO [String]
+findCabalExtensions start = do
+  cabal <- findCabalFile start
+  case cabal of
+    Nothing -> return []
+    Just fp -> readExtensions fp
+  where
+    findCabalFile dir = do
+      entries <- listDirectory dir
+      case find ((== ".cabal") . takeExtension) entries of
+        Just cabal -> return $ Just (dir </> cabal)
+        Nothing
+          | takeDirectory dir == dir -> return Nothing
+          | otherwise -> findCabalFile (takeDirectory dir)
+
+    readExtensions fp = do
+      contents <- readFile fp
+      return $ nub $ concatMap extensionBlock $ tails (lines contents)
+
+    extensionBlock [] = []
+    extensionBlock (line:rest)
+      | map toLower key /= "default-extensions" = []
+      | otherwise = extensions fieldValue ++ concatMap (extensions . dropWhile isSpace) continuation
+      where
+        indent = length line - length (dropWhile isSpace line)
+        (key, colonValue) = break (== ':') (dropWhile isSpace line)
+        fieldValue = drop 1 colonValue
+        continuation = takeWhile isContinuation rest
+        -- Cabal accepts field continuations indented relative to the section,
+        -- while some generators emit their values at the same indentation as
+        -- the field itself. A new field is distinguished by its colon.
+        isContinuation next = all isSpace next || ':' `notElem` next || length next - length (dropWhile isSpace next) > indent
+    extensions = filter valid . words . map separator . takeWhile (/= '-')
+    separator c
+      | c == ',' = ' '
+      | otherwise = c
+    valid extension = not (null extension) && all isAlphaNum extension
+
 -- | Find all fixity declarations in targetDir and add them to fixity env.
 addLocalFixities :: LibDir -> Options_ a b -> IO (Options_ a b)
 addLocalFixities libdir opts = do
-  -- do not limit search for infix decls to only targetFiles
-  let opts' = opts { targetFiles = [] }
-  -- "infix" will find infixl and infixr as well
-  files <- getTargetFiles opts' [HashSet.singleton "infix"]
+  -- When files are explicitly targeted, unrelated modules must not make the
+  -- operation fail merely because they use different language extensions.
+  -- "infix" will find infixl and infixr as well.
+  files <- getTargetFiles opts [HashSet.singleton "infix"]
 
   fixFns <- forFn opts files $ \ fp -> do
-    parsed <- trySync $ parseCPPFile (parseContentNoFixity libdir) fp
+    parsed <- trySync $ parseCPPFile (parseContentNoFixityWithExtensions libdir (languageExtensions opts)) fp
     case parsed of
       Left ex -> do
-        when (verbosity opts > Normal) $
-          putErrStrLn $ "Skipping fixity declarations in " ++ fp ++ ": " ++ show ex
+        when (verbosity opts > Silent) $
+          putErrStrLn $ fp ++ ": skipping fixity declarations: " ++ show ex
         return id
       Right cpp -> do
         let ms = toList cpp

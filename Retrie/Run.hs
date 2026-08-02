@@ -89,10 +89,10 @@ run libdir writeFn wrapper opts@Options{..} r = do
   fps <- getTargetFiles opts (getGroundTerms r)
   forFn opts fps $ \ fp -> wrapper $ do
     debugPrint verbosity "Processing:" [fp]
-    p <- trySync $ parseCPPFile (parseContent libdir fixityEnv) fp
+    p <- trySync $ parseCPPFile (parseContentWithExtensions libdir languageExtensions fixityEnv) fp
     case p of
       Left ex -> do
-        when (verbosity > Silent) $ print ex
+        when (verbosity > Silent) $ putStrLn $ fp ++ ": " ++ show ex
         return mempty
       Right cpp -> runOneModule (writeFn fp) opts r cpp
 

@@ -24,4 +24,11 @@ main = do
     when (verbosity > Silent) $ do
       putStrLn "Adding:"
       mapM_ (putStrLn . ppRewrite) rewrites
-    execute libdir opts $ apply rewrites
+    -- Search only needs the matched spans. Keeping each match unchanged avoids exact-printing an arbitrary placeholder RHS into the module; that can corrupt layout-sensitive expressions before writeSearch reports them.
+    let rewrites' = case executionMode of
+          ExecSearch -> identityRewrite <$> rewrites
+          _ -> rewrites
+    execute libdir opts $ apply rewrites'
+  where
+    identityRewrite q@Query{qPattern = pat, qResult = (t, tr)} =
+      q {qResult = (t {tTemplate = pat}, tr)}
